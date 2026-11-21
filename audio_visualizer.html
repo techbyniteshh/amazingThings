@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cybernetic Rainbow Audio Spectrum - Three.js</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #020813;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            user-select: none;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Minimalist Auto-Hiding Audio Controls */
+        .ui-bar {
+            position: fixed;
+            bottom: 22px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+            padding: 8px 16px;
+            background: rgba(4, 15, 30, 0.75);
+            border: 1px solid rgba(0, 245, 255, 0.25);
+            border-radius: 30px;
+            backdrop-filter: blur(8px);
+            z-index: 10;
+            transition: opacity 0.4s ease;
+            opacity: 0.25;
+        }
+
+        .ui-bar:hover {
+            opacity: 1.0;
+        }
+
+        .btn {
+            background: rgba(0, 225, 255, 0.12);
+            color: #d8f8ff;
+            border: 1px solid rgba(0, 225, 255, 0.4);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            letter-spacing: 1px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+
+        .btn:hover,
+        .btn.active {
+            background: rgba(0, 245, 255, 0.35);
+            box-shadow: 0 0 12px rgba(0, 245, 255, 0.6);
+            color: #fff;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="ui-bar">
+        <button class="btn active" id="btnSynth">SYNTH BEAT (AUTO)</button>
+        <label class="btn" for="audioUpload">LOAD MP3 / AUDIO</label>
+        <input type="file" id="audioUpload" accept="audio/*" />
+        <button class="btn" id="btnMic">LIVE MIC</button>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x020914);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 0, 12.2);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.25;
+        document.body.appendChild(renderer.domElement);
+
+        const composer = new EffectComposer(renderer);
+        composer.addPass(new RenderPass(scene, camera));
+
+        const bloomPass = new UnrealBloomPass(
+            new THREE.Vector2(window.innerWidth, window.innerHeight),
+            1.55, // Intense neon glow
+            0.55, // Soft halo spread
+            0.08  // Low threshold so all spectrum colors glow
+        );
+        composer.addPass(bloomPass);
+
+        // ============================================================================
+        // 2. PROCEDURAL RADIAL TEXTURES (NO EXTERNAL IMAGES = ZERO CORS ERRORS)
+        // ============================================================================
+        function createDotTexture(hollow = false) {
+            const c = document.createElement('canvas');
+            c.width = 64; c.height = 64;
+            const ctx = c.getContext('2d');
+            if (hollow) {
+                // Micro-bead hollow ring sprite (matches the tiny circles in the base band)
+                ctx.beginPath();
+                ctx.arc(32, 32, 20, 0, Math.PI * 2);
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 10;
+                ctx.stroke();
+            } else {
+                const g = ctx.createRadialGradient(32, 32, 2, 32, 32, 30);
+                g.addColorStop(0, 'rgba(255,255,255,1)');
+                g.addColorStop(0.4, 'rgba(255,255,255,0.8)');
+                g.addColorStop(1, 'rgba(255,255,255,0)');
+                ctx.fillStyle = g;
+                ctx.fillRect(0, 0, 64, 64);
+            }
+            return new THREE.CanvasTexture(c);
+        }
+
+        const softGlowTex = createDotTexture(false);
+        const beadRingTex = createDotTexture(true);
+
+        // Multi-cycle Rainbow Spectrum Helper (Matches the exact 2-cycle hue wraparound)
+        function getSpectrumColor(angle, lightness = 0.58) {
+            // 2 full rainbow cycles around the 360-degree circle
+            const normalized = ((angle / (Math.PI * 2)) * 2.0 + 0.15) % 1.0;
+            const col = new THREE.Color();
+            col.setHSL((normalized + 1.0) % 1.0, 1.0, lightness);
+            return col;
+        }
+
+        const visualizerGroup = new THREE.Group();
+        scene.add(visualizerGroup);
+
+        // ============================================================================
+        // 3. LAYER A: CIRCUIT-BENT OUTER SPECTRUM BARS (WITH ANGULAR ELBOW BENDS)
+        // ============================================================================
+        const BAR_COUNT = 380;
+        const BASE_RADIUS = 3.18;
+        // Each bar has 3 segments (6 vertices) so it can form circuit-board elbow bends
+        const barPositions = new Float32Array(BAR_COUNT * 6 * 3);
+        const barColors = new Float32Array(BAR_COUNT * 6 * 3);
+        const barMeta = [];
+
+        for (let i = 0; i < BAR_COUNT; i++) {
+            const angle = (i / BAR_COUNT) * Math.PI * 2;
+            const colBase = getSpectrumColor(angle, 0.55);
+            const colTip = getSpectrumColor(angle, 0.82); // Brighter white-tinted tips
+
+            // Pre-assign organic circuit-elbow bend angle and bend threshold
+            const bendDir = (i % 5 < 2 ? 1 : -1) * (0.025 + (i % 7) * 0.006);
+            const bendStartRatio = 0.45 + (i % 4) * 0.10;
+
+            barMeta.push({ angle, bendDir, bendStartRatio });
+
+            const idx = i * 18;
+            // Segment 1, 2, 3 colors
+            const segCols = [colBase, colBase, colBase, colTip, colTip, colTip];
+            for (let v = 0; v < 6; v++) {
+                barColors[idx + v * 3] = segCols[v].r;
+                barColors[idx + v * 3 + 1] = segCols[v].g;
+                barColors[idx + v * 3 + 2] = segCols[v].b;
+            }
+        }
+
+        const barGeo = new THREE.BufferGeometry();
+        barGeo.setAttribute('position', new THREE.BufferAttribute(barPositions, 3));
+        barGeo.setAttribute('color', new THREE.BufferAttribute(barColors, 3));
+        const barMat = new THREE.LineBasicMaterial({
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.95,
+            blending: THREE.AdditiveBlending
+        });
+        const outerSpectrumBars = new THREE.LineSegments(barGeo, barMat);
+        visualizerGroup.add(outerSpectrumBars);
+
+        // ============================================================================
+        // 4. LAYER B: DENSE MICRO-BEAD MATRIX BAND (BASE OF OUTER RING)
+        // ============================================================================
+        const BEAD_COUNT = 2600;
+        const beadPositions = new Float32Array(BEAD_COUNT * 3);
+        const beadColors = new Float32Array(BEAD_COUNT * 3);
+        const beadMeta = [];
+
+        for (let i = 0; i < BEAD_COUNT; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const radialOffset = (Math.random() - 0.15) * 0.35; // Clustered near base
+            const freqBin = Math.floor(((angle / (Math.PI * 2)) * BAR_COUNT)) % BAR_COUNT;
+            const col = getSpectrumColor(angle, 0.60);
+
+            beadMeta.push({ angle, radialOffset, freqBin, speed: 0.5 + Math.random() });
+            beadColors[i * 3] = col.r;
+            beadColors[i * 3 + 1] = col.g;
+            beadColors[i * 3 + 2] = col.b;
+        }
+
+        const beadGeo = new THREE.BufferGeometry();
+        beadGeo.setAttribute('position', new THREE.BufferAttribute(beadPositions, 3));
+        beadGeo.setAttribute('color', new THREE.BufferAttribute(beadColors, 3));
+        const beadMat = new THREE.PointsMaterial({
+            size: 0.055,
+            map: beadRingTex,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.85,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        const beadMatrixCloud = new THREE.Points(beadGeo, beadMat);
+        visualizerGroup.add(beadMatrixCloud);
+
+        // ============================================================================
+        // 5. LAYER C: JAGGED SAWTOOTH WAVEFORM RING (WEAVING AROUND BASE)
+        // ============================================================================
+        const SAW_POINTS = 280;
+        const sawPositions = new Float32Array((SAW_POINTS + 1) * 3);
+        const sawColors = new Float32Array((SAW_POINTS + 1) * 3);
+
+        for (let i = 0; i <= SAW_POINTS; i++) {
+            const angle = (i / SAW_POINTS) * Math.PI * 2;
+            const col = getSpectrumColor(angle + 0.08, 0.72);
+            sawColors[i * 3] = col.r;
+            sawColors[i * 3 + 1] = col.g;
+            sawColors[i * 3 + 2] = col.b;
+        }
+
+        const sawGeo = new THREE.BufferGeometry();
+        sawGeo.setAttribute('position', new THREE.BufferAttribute(sawPositions, 3));
+        sawGeo.setAttribute('color', new THREE.BufferAttribute(sawColors, 3));
+        const sawLine = new THREE.Line(sawGeo, new THREE.LineBasicMaterial({
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.9,
+            blending: THREE.AdditiveBlending
+        }));
+        visualizerGroup.add(sawLine);
+
+        // ============================================================================
+        // 6. LAYER D: INNER CONCENTRIC EQUALIZER, DOTTED RINGS & INWARD SPIKES
+        // ============================================================================
+        const INNER_BARS = 180;
+        const INNER_RADIUS = 1.62;
+        const innerBarPos = new Float32Array(INNER_BARS * 2 * 3);
+        const innerBarCol = new Float32Array(INNER_BARS * 2 * 3);
+
+        for (let i = 0; i < INNER_BARS; i++) {
+            const angle = (i / INNER_BARS) * Math.PI * 2;
+            const col = getSpectrumColor(angle, 0.55);
+            const idx = i * 6;
+            innerBarCol[idx] = col.r; innerBarCol[idx + 1] = col.g; innerBarCol[idx + 2] = col.b;
+            innerBarCol[idx + 3] = col.r; innerBarCol[idx + 4] = col.g; innerBarCol[idx + 5] = col.b;
+        }
+
+        const innerBarGeo = new THREE.BufferGeometry();
+        innerBarGeo.setAttribute('position', new THREE.BufferAttribute(innerBarPos, 3));
+        innerBarGeo.setAttribute('color', new THREE.BufferAttribute(innerBarCol, 3));
+        const innerEqualizer = new THREE.LineSegments(innerBarGeo, new THREE.LineBasicMaterial({
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.65,
+            blending: THREE.AdditiveBlending
+        }));
+        visualizerGroup.add(innerEqualizer);
+
+        // Two Concentric Dotted Harmonic Wave Rings around the Inner Equalizer
+        const DOT_RING_COUNT = 220;
+        function createDottedWaveRing(radius, opacity) {
+            const pos = new Float32Array(DOT_RING_COUNT * 3);
+            const col = new Float32Array(DOT_RING_COUNT * 3);
+            for (let i = 0; i < DOT_RING_COUNT; i++) {
+                const a = (i / DOT_RING_COUNT) * Math.PI * 2;
+                const c = getSpectrumColor(a, 0.5);
+                col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+            }
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+            const pts = new THREE.Points(geo, new THREE.PointsMaterial({
+                size: 0.04,
+                map: softGlowTex,
+                vertexColors: true,
+                transparent: true,
+                opacity: opacity,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending
+            }));
+            visualizerGroup.add(pts);
+            return { pts, radius };
+        }
+
+        const outerDottedRing = createDottedWaveRing(1.88, 0.55);
+        const innerDottedRing = createDottedWaveRing(1.38, 0.40);
+
+        // ============================================================================
+        // 7. LAYER E: FLOATING INNER SPARKS & OUT-OF-FOCUS BACKGROUND BOKEH
+        // ============================================================================
+        const SPARK_COUNT = 420;
+        const sparkPos = new Float32Array(SPARK_COUNT * 3);
+        const sparkCol = new Float32Array(SPARK_COUNT * 3);
+        const sparkData = [];
+
+        for (let i = 0; i < SPARK_COUNT; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const r = 2.1 + Math.random() * 1.05;
+            const c = getSpectrumColor(angle, 0.62);
+            sparkPos[i * 3] = Math.cos(angle) * r;
+            sparkPos[i * 3 + 1] = Math.sin(angle) * r;
+            sparkPos[i * 3 + 2] = (Math.random() - 0.5) * 0.5;
+            sparkCol[i * 3] = c.r; sparkCol[i * 3 + 1] = c.g; sparkCol[i * 3 + 2] = c.b;
+            sparkData.push({ angle, r, drift: (Math.random() - 0.5) * 0.4, phase: Math.random() * 6.28 });
+        }
+
+        const sparkGeo = new THREE.BufferGeometry();
+        sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPos, 3));
+        sparkGeo.setAttribute('color', new THREE.BufferAttribute(sparkCol, 3));
+        const innerSparks = new THREE.Points(sparkGeo, new THREE.PointsMaterial({
+            size: 0.075,
+            map: softGlowTex,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.85,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        }));
+        visualizerGroup.add(innerSparks);
+
+        // Large Blurry Bokeh Orbs in Deep Background (Matches bottom-left/right bokeh in image)
+        const BOKEH_COUNT = 28;
+        const bokehPos = new Float32Array(BOKEH_COUNT * 3);
+        const bokehCol = new Float32Array(BOKEH_COUNT * 3);
+        for (let i = 0; i < BOKEH_COUNT; i++) {
+            bokehPos[i * 3] = (Math.random() - 0.5) * 16;
+            bokehPos[i * 3 + 1] = (Math.random() - 0.5) * 10;
+            bokehPos[i * 3 + 2] = -3.0 - Math.random() * 4.0;
+            const c = getSpectrumColor(Math.random() * Math.PI * 2, 0.45);
+            bokehCol[i * 3] = c.r; bokehCol[i * 3 + 1] = c.g; bokehCol[i * 3 + 2] = c.b;
+        }
+        const bokehGeo = new THREE.BufferGeometry();
+        bokehGeo.setAttribute('position', new THREE.BufferAttribute(bokehPos, 3));
+        bokehGeo.setAttribute('color', new THREE.BufferAttribute(bokehCol, 3));
+        const bokehCloud = new THREE.Points(bokehGeo, new THREE.PointsMaterial({
+            size: 1.45,
+            map: softGlowTex,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.14,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        }));
+        scene.add(bokehCloud);
+
+        // ============================================================================
+        // 8. HYBRID AUDIO ENGINE (SYNTHETIC BEAT + MP3 FILE + LIVE MICROPHONE)
+        // ============================================================================
+        let audioMode = 'synth'; // 'synth' | 'file' | 'mic'
+        let audioCtx = null;
+        let analyser = null;
+        let freqData = new Uint8Array(512);
+        let audioElement = null;
+        const smoothedFreq = new Float32Array(BAR_COUNT);
+
+        function initWebAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 1024;
+                analyser.smoothingTimeConstant = 0.78;
+                freqData = new Uint8Array(analyser.frequencyBinCount);
+            }
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        document.getElementById('btnSynth').addEventListener('click', (e) => {
+            audioMode = 'synth';
+            if (audioElement) audioElement.pause();
+            setActiveButton(e.target);
+        });
+
+        document.getElementById('audioUpload').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            initWebAudio();
+            if (audioElement) audioElement.pause();
+            audioElement = new Audio(URL.createObjectURL(file));
+            audioElement.loop = true;
+            const src = audioCtx.createMediaElementSource(audioElement);
+            src.connect(analyser);
+            analyser.connect(audioCtx.destination);
+            audioElement.play();
+            audioMode = 'file';
+            setActiveButton(document.querySelector('label[for="audioUpload"]'));
+        });
+
+        document.getElementById('btnMic').addEventListener('click', async (e) => {
+            try {
+                initWebAudio();
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                if (audioElement) audioElement.pause();
+                const src = audioCtx.createMediaStreamSource(stream);
+                src.connect(analyser);
+                audioMode = 'mic';
+                setActiveButton(e.target);
+            } catch (err) {
+                alert('Microphone permission denied or unavailable.');
+            }
+        });
+
+        function setActiveButton(target) {
+            document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+            target.classList.add('active');
+        }
+
+        // Generates the asymmetric high-energy left/top-left/bottom profile from your image
+        function getSpectrumValues(t) {
+            if ((audioMode === 'file' || audioMode === 'mic') && analyser) {
+                analyser.getByteFrequencyData(freqData);
+            }
+
+            // Synthetic 128 BPM EDM Kick & Bass Pulse
+            const beatPulse = Math.pow(Math.max(0, Math.sin(t * 6.7)), 6.0);
+
+            for (let i = 0; i < BAR_COUNT; i++) {
+                const angle = barMeta[i].angle;
+                let targetVal = 0;
+
+                if (audioMode === 'synth') {
+                    // Directional envelope matching reference image:
+                    // Strongest burst on Top-Left (110°–240°) and Bottom (250°–300°), calmer on Right
+                    const leftBurst = Math.exp(-Math.pow(Math.cos(angle - 2.35) - 1.0, 2.0) * 2.2);
+                    const bottomBurst = Math.exp(-Math.pow(Math.cos(angle - 4.55) - 1.0, 2.0) * 3.5) * 0.75;
+                    const rightRipple = Math.exp(-Math.pow(Math.cos(angle - 0.15) - 1.0, 2.0) * 6.0) * 0.45;
+                    const envelope = 0.08 + leftBurst * 1.15 + bottomBurst + rightRipple;
+
+                    // Multi-harmonic frequency spikes
+                    const h1 = Math.abs(Math.sin(i * 0.35 + t * 5.2));
+                    const h2 = Math.abs(Math.cos(i * 0.85 - t * 7.8));
+                    const h3 = Math.pow(Math.abs(Math.sin(i * 1.7 + t * 3.4)), 3.0);
+                    const spike = (i % 9 === 0) ? 1.45 : 1.0;
+
+                    targetVal = envelope * (0.22 * h1 + 0.35 * h2 + 0.65 * h3) * spike * (0.72 + 0.48 * beatPulse);
+                } else {
+                    const bin = Math.floor((i / BAR_COUNT) * 180) + 4;
+                    targetVal = (freqData[bin] / 255.0) * 1.45;
+                }
+
+                smoothedFreq[i] += (targetVal - smoothedFreq[i]) * 0.28;
+            }
+            return beatPulse;
+        }
+
+        // ============================================================================
+        // 9. MAIN 60 FPS ANIMATION & GEOMETRY UPDATE LOOP
+        // ============================================================================
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const t = clock.getElapsedTime();
+            const beatPulse = getSpectrumValues(t);
+
+            // 1. Update Outer Circuit-Bent Spectrum Bars
+            const posArr = outerSpectrumBars.geometry.attributes.position.array;
+            for (let i = 0; i < BAR_COUNT; i++) {
+                const { angle, bendDir, bendStartRatio } = barMeta[i];
+                const amp = smoothedFreq[i] * 2.15;
+                const r0 = BASE_RADIUS;
+                const r1 = BASE_RADIUS + amp * bendStartRatio;
+                const r2 = BASE_RADIUS + amp;
+                const r3 = BASE_RADIUS + amp * 1.18;
+
+                // Circuit board elbow bend only activates when amplitude is high
+                const activeBend = amp > 0.42 ? bendDir * (amp - 0.3) : 0.0;
+                const a0 = angle;
+                const a1 = angle;
+                const a2 = angle + activeBend;
+                const a3 = angle + activeBend; // Straight outer tip after the elbow bend
+
+                const idx = i * 18;
+                // Segment 1: Base to Knee 1
+                posArr[idx] = Math.cos(a0) * r0; posArr[idx + 1] = Math.sin(a0) * r0; posArr[idx + 2] = 0;
+                posArr[idx + 3] = Math.cos(a1) * r1; posArr[idx + 4] = Math.sin(a1) * r1; posArr[idx + 5] = 0;
+                // Segment 2: Diagonal Circuit Elbow Bend
+                posArr[idx + 6] = Math.cos(a1) * r1; posArr[idx + 7] = Math.sin(a1) * r1; posArr[idx + 8] = 0;
+                posArr[idx + 9] = Math.cos(a2) * r2; posArr[idx + 10] = Math.sin(a2) * r2; posArr[idx + 11] = 0;
+                // Segment 3: Outer Tip Extension
+                posArr[idx + 12] = Math.cos(a2) * r2; posArr[idx + 13] = Math.sin(a2) * r2; posArr[idx + 14] = 0;
+                posArr[idx + 15] = Math.cos(a3) * r3; posArr[idx + 16] = Math.sin(a3) * r3; posArr[idx + 17] = 0;
+            }
+            outerSpectrumBars.geometry.attributes.position.needsUpdate = true;
+
+            // 2. Update Micro-Bead Base Matrix Cloud
+            const bPos = beadMatrixCloud.geometry.attributes.position.array;
+            for (let i = 0; i < BEAD_COUNT; i++) {
+                const m = beadMeta[i];
+                const energy = smoothedFreq[m.freqBin];
+                const r = BASE_RADIUS - 0.05 + m.radialOffset * (0.4 + energy * 1.45);
+                bPos[i * 3] = Math.cos(m.angle) * r;
+                bPos[i * 3 + 1] = Math.sin(m.angle) * r;
+                bPos[i * 3 + 2] = Math.sin(t * m.speed + i) * 0.08;
+            }
+            beadMatrixCloud.geometry.attributes.position.needsUpdate = true;
+
+            // 3. Update Jagged Sawtooth Waveform Ring
+            const sPos = sawLine.geometry.attributes.position.array;
+            for (let i = 0; i <= SAW_POINTS; i++) {
+                const idx = i % SAW_POINTS;
+                const angle = (idx / SAW_POINTS) * Math.PI * 2;
+                const fBin = Math.floor((idx / SAW_POINTS) * BAR_COUNT);
+                const zigZag = (i % 2 === 0 ? 1 : -1) * (0.06 + smoothedFreq[fBin] * 0.24);
+                const r = BASE_RADIUS + 0.04 + zigZag;
+                sPos[i * 3] = Math.cos(angle) * r;
+                sPos[i * 3 + 1] = Math.sin(angle) * r;
+                sPos[i * 3 + 2] = 0.02;
+            }
+            sawLine.geometry.attributes.position.needsUpdate = true;
+
+            // 4. Update Inner Concentric Equalizer (With Signature Inward Oscilloscope Spikes)
+            const inPos = innerEqualizer.geometry.attributes.position.array;
+            for (let i = 0; i < INNER_BARS; i++) {
+                const angle = (i / INNER_BARS) * Math.PI * 2;
+                const fBin = Math.floor((i / INNER_BARS) * BAR_COUNT);
+                let len = 0.04 + smoothedFreq[fBin] * 0.22;
+
+                // Signature sharp inward spikes (like the 9-o'clock and 6-o'clock spikes in image)
+                let inwardExtra = 0;
+                if (i === 92 || i === 132 || i === 38) {
+                    inwardExtra = 0.35 + smoothedFreq[fBin] * 0.55;
+                }
+
+                const rIn = INNER_RADIUS - len - inwardExtra;
+                const rOut = INNER_RADIUS + len * 0.75;
+                const idx = i * 6;
+                inPos[idx] = Math.cos(angle) * rIn; inPos[idx + 1] = Math.sin(angle) * rIn; inPos[idx + 2] = 0;
+                inPos[idx + 3] = Math.cos(angle) * rOut; inPos[idx + 4] = Math.sin(angle) * rOut; inPos[idx + 5] = 0;
+            }
+            innerEqualizer.geometry.attributes.position.needsUpdate = true;
+
+            // 5. Update Dotted Harmonic Wave Rings
+            [outerDottedRing, innerDottedRing].forEach((ringObj, rIdx) => {
+                const dArr = ringObj.pts.geometry.attributes.position.array;
+                for (let i = 0; i < DOT_RING_COUNT; i++) {
+                    const a = (i / DOT_RING_COUNT) * Math.PI * 2;
+                    const wave = Math.sin(a * 18.0 + t * (rIdx === 0 ? 3.0 : -2.5)) * 0.045;
+                    const r = ringObj.radius + wave * (1.0 + beatPulse * 0.8);
+                    dArr[i * 3] = Math.cos(a) * r;
+                    dArr[i * 3 + 1] = Math.sin(a) * r;
+                    dArr[i * 3 + 2] = 0;
+                }
+                ringObj.pts.geometry.attributes.position.needsUpdate = true;
+            });
+
+            // 6. Update Floating Inner Cavity Sparks
+            const spArr = innerSparks.geometry.attributes.position.array;
+            for (let i = 0; i < SPARK_COUNT; i++) {
+                const sd = sparkData[i];
+                const curR = sd.r + Math.sin(t * 1.8 + sd.phase) * 0.14;
+                const curA = sd.angle + t * 0.05 * sd.drift;
+                spArr[i * 3] = Math.cos(curA) * curR;
+                spArr[i * 3 + 1] = Math.sin(curA) * curR;
+            }
+            innerSparks.geometry.attributes.position.needsUpdate = true;
+
+            // Subtle breathing & slow orbital rotation
+            visualizerGroup.rotation.z = Math.sin(t * 0.18) * 0.04;
+            const scaleBreath = 1.0 + beatPulse * 0.025;
+            visualizerGroup.scale.set(scaleBreath, scaleBreath, 1.0);
+
+            composer.render();
+        }
+
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+
+</html>
